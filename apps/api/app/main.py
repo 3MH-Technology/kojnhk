@@ -46,11 +46,11 @@ async def _bootstrap_admin() -> None:
     now = datetime.now(tz=timezone.utc)
     created = 0
 
-    if await mongo.users().count_documents({}) == 0:
-        log.warning("no users in db; creating bootstrap accounts")
-        doc = {
+    admin_email = settings.bootstrap_admin_email.lower()
+    if await mongo.users().count_documents({"email": admin_email}) == 0:
+        await mongo.users().insert_one({
             "username": settings.bootstrap_admin_username,
-            "email": settings.bootstrap_admin_email.lower(),
+            "email": admin_email,
             "passwordHash": hash_password(settings.bootstrap_admin_password),
             "role": "superadmin",
             "status": "approved",
@@ -60,9 +60,8 @@ async def _bootstrap_admin() -> None:
             "lastLogin": None,
             "failedLoginAttempts": 0,
             "lockedUntil": None,
-        }
-        await mongo.users().insert_one(doc)
-        log.info("bootstrap admin created: %s", settings.bootstrap_admin_email)
+        })
+        log.info("bootstrap admin created: %s", admin_email)
         created += 1
 
     if await mongo.users().count_documents({"email": "developer@teteffd.hf.space"}) == 0:
