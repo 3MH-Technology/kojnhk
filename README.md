@@ -1,3 +1,12 @@
+---
+title: WormGPT
+emoji: 🧠
+colorFrom: gray
+colorTo: blue
+sdk: docker
+pinned: false
+---
+
 # WormGPT
 
 > Production-grade AI chat platform. Streaming chat, multi-source research, collaborative canvases, full developer panel, admin approval workflow, and a polished UI.
