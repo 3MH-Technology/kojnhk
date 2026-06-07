@@ -17,13 +17,14 @@ _client: Optional[redis.Redis] = None
 async def connect() -> redis.Redis:
     global _client
     settings = get_settings()
-    _client = redis.from_url(
-        settings.redis_url,
-        password=settings.redis_password or None,
+    kwargs: dict = dict(
         decode_responses=True,
         socket_connect_timeout=5,
         protocol=2,
     )
+    if settings.redis_password:
+        kwargs["password"] = settings.redis_password
+    _client = redis.from_url(settings.redis_url, **kwargs)
     await _client.ping()
     log.info("redis.connected url=%s", settings.redis_url)
     return _client
