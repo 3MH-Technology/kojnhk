@@ -30,4 +30,4 @@ EXPOSE 7860
 ENV PORT=7860 \
     NEXT_PUBLIC_API_URL=http://localhost:8000
 
-CMD ["sh", "-c", "(cd apps/api && uvicorn app.main:app --host 0.0.0.0 --port 8000) & (cd apps/web && npx next start -p $PORT) & wait"]
+CMD ["sh", "-c", "(cd apps/api && uvicorn app.main:app --host 0.0.0.0 --port 8000) & (cd apps/web && npx next start -H 0.0.0.0 -p $PORT) & wait"]
