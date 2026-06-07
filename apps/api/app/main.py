@@ -47,9 +47,13 @@ async def _bootstrap_admin() -> None:
     created = 0
 
     admin_email = settings.bootstrap_admin_email.lower()
-    if await mongo.users().count_documents({"email": admin_email}) == 0:
+    admin_username = settings.bootstrap_admin_username
+    admin_exists = await mongo.users().count_documents({
+        "$or": [{"email": admin_email}, {"username": admin_username}]
+    }) > 0
+    if not admin_exists:
         await mongo.users().insert_one({
-            "username": settings.bootstrap_admin_username,
+            "username": admin_username,
             "email": admin_email,
             "passwordHash": hash_password(settings.bootstrap_admin_password),
             "role": "superadmin",
@@ -64,10 +68,14 @@ async def _bootstrap_admin() -> None:
         log.info("bootstrap admin created: %s", admin_email)
         created += 1
 
-    if await mongo.users().count_documents({"email": "developer@teteffd.hf.space"}) == 0:
+    dev_email = "developer@teteffd.hf.space"
+    dev_exists = await mongo.users().count_documents({
+        "$or": [{"email": dev_email}, {"username": "developer"}]
+    }) > 0
+    if not dev_exists:
         await mongo.users().insert_one({
             "username": "developer",
-            "email": "developer@teteffd.hf.space",
+            "email": dev_email,
             "passwordHash": hash_password("Dev123!"),
             "role": "developer",
             "status": "approved",
