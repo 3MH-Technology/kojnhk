@@ -1,0 +1,81 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/
+
+# testing
+coverage/
+
+# next.js
+.next/
+out/
+build/
+dist/
+
+# production
+*.tgz
+
+# misc
+.DS_Store
+*.pem
+.idea/
+.vscode/
+*.swp
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# local env files
+.env
+.env.local
+.env.*.local
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+*.egg-info/
+
+# build artifacts
+*.whl
+
+# os
+Thumbs.db
+desktop.ini
+
+# logs
+logs/
+*.log
+
+# coverage
+.coverage
+htmlcov/
+
+# docker
+.docker-data/
+volumes/
+
+# workspace archive
+workspace-*.tar
+workspace-*.tar.gz
+
+# generated
+apps/api/.mypy_cache/
+apps/web/.next/cache/

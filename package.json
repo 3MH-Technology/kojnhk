@@ -1,0 +1,33 @@
+{
+  "name": "wormgpt",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WormGPT - production-grade AI chat platform",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "cd apps/api && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+    "dev:web": "cd apps/web && next dev -p 3000",
+    "build": "npm run build --workspace=apps/web",
+    "lint": "cd apps/web && npm run lint",
+    "typecheck": "tsc -p apps/web/tsconfig.json --noEmit",
+    "format": "prettier --write \"apps/**/*.{ts,tsx,js,json,md}\"",
+    "seed": "cd apps/api && python -m scripts.seed",
+    "docker:up": "cd infra/docker && docker compose up -d",
+    "docker:down": "cd infra/docker && docker compose down",
+    "docker:logs": "cd infra/docker && docker compose logs -f"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "concurrently": "^8.2.2",
+    "eslint": "^8.57.0",
+    "prettier": "^3.2.5",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

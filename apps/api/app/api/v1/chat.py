@@ -1,0 +1,524 @@
+"""Conversation + message endpoints. Streaming uses SSE."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from datetime import datetime, timezone
+from typing import Any
+
+from bson import ObjectId
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from sse_starlette.sse import EventSourceResponse
+
+from app.api.deps import current_user, enforce_approval, rate_limit
+from app.api.v1.memory import gather_for_chat
+from app.core.crypto import decrypt
+from app.core.config import get_settings
+from app.db import mongo
+from app.models.chat import (
+    ConversationCreate,
+    ConversationOut,
+    ConversationUpdate,
+    ConversationWithMessages,
+    FolderCreate,
+    FolderOut,
+    MessageCreate,
+    MessageEdit,
+    MessageOut,
+    MessageReaction,
+)
+from app.providers import get_provider
+from app.providers.base import ChatMessage, ChatRequest
+from app.services.audit import log_action
+
+log = logging.getLogger(__name__)
+router = APIRouter(prefix="/chat", tags=["chat"])
+
+
+async def _web_search_for_chat(query: str, max_results: int = 5) -> str:
+    """Run a web search and return formatted results for injection into the system prompt."""
+    from app.api.v1.web import _ddg_search, _serper_search, _tavily_search
+    settings = get_settings()
+    provider = settings.web_search_provider
+    try:
+        if provider == "serper" and settings.serper_api_key:
+            results = await _serper_search(query, max_results, settings.serper_api_key)
+        elif provider == "tavily" and settings.tavily_api_key:
+            results = await _tavily_search(query, max_results, settings.tavily_api_key)
+        else:
+            results = await _ddg_search(query, max_results)
+    except Exception:
+        log.exception("web_search_for_chat failed")
+        return ""
+    if not results:
+        return ""
+    lines = []
+    for i, r in enumerate(results, 1):
+        lines.append(f"[{i}] **{r.title}**\n    URL: {r.url}\n    {r.snippet}")
+    return "\n\n".join(lines)
+
+
+# ---- Folders ----
+def _folder_out(doc: dict, count: int = 0) -> FolderOut:
+    return FolderOut(
+        id=str(doc["_id"]),
+        userId=str(doc["userId"]),
+        name=doc["name"],
+        color=doc.get("color"),
+        icon=doc.get("icon"),
+        conversationCount=count,
+    )
+
+
+@router.get("/folders", response_model=list[FolderOut])
+async def list_folders(user=Depends(current_user)) -> list[FolderOut]:
+    folders = await mongo.folders().find({"userId": user["_id"]}).sort("name", 1).to_list(length=200)
+    out = []
+    for f in folders:
+        cnt = await mongo.conversations().count_documents({"userId": user["_id"], "folderId": f["_id"]})
+        out.append(_folder_out(f, cnt))
+    return out
+
+
+@router.post("/folders", response_model=FolderOut, status_code=201)
+async def create_folder(payload: FolderCreate, user=Depends(current_user)) -> FolderOut:
+    doc = {
+        "userId": user["_id"],
+        "name": payload.name,
+        "color": payload.color,
+        "icon": payload.icon,
+        "createdAt": datetime.now(tz=timezone.utc),
+    }
+    res = await mongo.folders().insert_one(doc)
+    doc["_id"] = res.inserted_id
+    return _folder_out(doc)
+
+
+@router.delete("/folders/{folder_id}", status_code=204)
+async def delete_folder(folder_id: str, user=Depends(current_user)) -> None:
+    await mongo.folders().delete_one({"_id": ObjectId(folder_id), "userId": user["_id"]})
+    await mongo.conversations().update_many(
+        {"userId": user["_id"], "folderId": ObjectId(folder_id)},
+        {"$unset": {"folderId": ""}},
+    )
+
+
+# ---- Conversations ----
+def _conv_out(doc: dict, msg_count: int = 0) -> ConversationOut:
+    return ConversationOut(
+        id=str(doc["_id"]),
+        userId=str(doc["userId"]),
+        title=doc.get("title") or "New chat",
+        modelId=str(doc["modelId"]) if doc.get("modelId") else None,
+        folderId=str(doc["folderId"]) if doc.get("folderId") else None,
+        favorite=doc.get("favorite", False),
+        shared=doc.get("shared", False),
+        messageCount=msg_count,
+        lastMessageAt=doc.get("lastMessageAt"),
+        createdAt=doc.get("createdAt") or datetime.now(tz=timezone.utc),
+        updatedAt=doc.get("updatedAt") or datetime.now(tz=timezone.utc),
+    )
+
+
+@router.get("/conversations", response_model=list[ConversationOut])
+async def list_conversations(
+    user=Depends(current_user),
+    q: str | None = None,
+    folderId: str | None = None,
+    favorite: bool | None = None,
+    shared: bool | None = None,
+    limit: int = Query(default=100, le=200),
+) -> list[ConversationOut]:
+    query: dict[str, Any] = {"userId": user["_id"]}
+    if folderId:
+        query["folderId"] = ObjectId(folderId)
+    if favorite is not None:
+        query["favorite"] = favorite
+    if shared is not None:
+        query["shared"] = shared
+    if q:
+        query["$or"] = [
+            {"title": {"$regex": q, "$options": "i"}},
+        ]
+    docs = await mongo.conversations().find(query).sort("updatedAt", -1).limit(limit).to_list(length=limit)
+    return [_conv_out(d) for d in docs]
+
+
+@router.post("/conversations", response_model=ConversationOut, status_code=201)
+async def create_conversation(payload: ConversationCreate, user=Depends(current_user)) -> ConversationOut:
+    await enforce_approval(user)
+    now = datetime.now(tz=timezone.utc)
+    doc = {
+        "userId": user["_id"],
+        "title": payload.title or "New chat",
+        "modelId": ObjectId(payload.modelId) if payload.modelId else None,
+        "folderId": ObjectId(payload.folderId) if payload.folderId else None,
+        "favorite": False,
+        "shared": False,
+        "createdAt": now,
+        "updatedAt": now,
+        "lastMessageAt": None,
+    }
+    res = await mongo.conversations().insert_one(doc)
+    doc["_id"] = res.inserted_id
+    return _conv_out(doc)
+
+
+@router.get("/conversations/{cid}", response_model=ConversationWithMessages)
+async def get_conversation(cid: str, user=Depends(current_user), limit: int = Query(default=200, le=500)) -> ConversationWithMessages:
+    conv = await mongo.conversations().find_one({"_id": ObjectId(cid), "userId": user["_id"]})
+    if not conv:
+        raise HTTPException(404, "conversation not found")
+    msgs = await mongo.messages().find({"conversationId": conv["_id"]}).sort("createdAt", 1).limit(limit).to_list(length=limit)
+    msg_count = await mongo.messages().count_documents({"conversationId": conv["_id"]})
+    base = _conv_out(conv, msg_count)
+    return ConversationWithMessages(
+        **base.model_dump(),
+        messages=[MessageOut(
+            id=str(m["_id"]),
+            conversationId=str(m["conversationId"]),
+            role=m["role"],
+            content=m["content"],
+            tokens=m.get("tokens"),
+            model=m.get("model"),
+            metadata=m.get("metadata") or {},
+            reaction=m.get("reaction"),
+            parentId=str(m["parentId"]) if m.get("parentId") else None,
+            createdAt=m["createdAt"],
+            editedAt=m.get("editedAt"),
+        ) for m in msgs],
+    )
+
+
+@router.patch("/conversations/{cid}", response_model=ConversationOut)
+async def update_conversation(cid: str, payload: ConversationUpdate, user=Depends(current_user)) -> ConversationOut:
+    updates = payload.model_dump(exclude_none=True)
+    if not updates:
+        conv = await mongo.conversations().find_one({"_id": ObjectId(cid), "userId": user["_id"]})
+        if not conv:
+            raise HTTPException(404, "not found")
+        return _conv_out(conv)
+    updates["updatedAt"] = datetime.now(tz=timezone.utc)
+    res = await mongo.conversations().update_one(
+        {"_id": ObjectId(cid), "userId": user["_id"]},
+        {"$set": updates},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "not found")
+    conv = await mongo.conversations().find_one({"_id": ObjectId(cid)})
+    return _conv_out(conv)
+
+
+@router.delete("/conversations/{cid}", status_code=204)
+async def delete_conversation(cid: str, user=Depends(current_user)) -> None:
+    res = await mongo.conversations().delete_one({"_id": ObjectId(cid), "userId": user["_id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "not found")
+    await mongo.messages().delete_many({"conversationId": ObjectId(cid)})
+
+
+# ---- Messages ----
+@router.post("/conversations/{cid}/messages", response_model=MessageOut)
+async def post_message(cid: str, payload: MessageCreate, user=Depends(current_user), _: None = Depends(rate_limit)) -> MessageOut:
+    """Non-streaming message send. Returns the saved user message; assistant reply
+    can be fetched via /stream. Prefer /stream for chat UX."""
+    await enforce_approval(user)
+    conv = await mongo.conversations().find_one({"_id": ObjectId(cid), "userId": user["_id"]})
+    if not conv:
+        raise HTTPException(404, "conversation not found")
+
+    now = datetime.now(tz=timezone.utc)
+    doc = {
+        "conversationId": conv["_id"],
+        "userId": user["_id"],
+        "role": payload.role,
+        "content": payload.content,
+        "tokens": None,
+        "model": None,
+        "metadata": {"attachments": payload.attachments or []},
+        "parentId": ObjectId(payload.parentId) if payload.parentId else None,
+        "createdAt": now,
+    }
+    res = await mongo.messages().insert_one(doc)
+    doc["_id"] = res.inserted_id
+    await mongo.conversations().update_one(
+        {"_id": conv["_id"]},
+        {"$set": {"updatedAt": now, "lastMessageAt": now},
+         "$setOnInsert": {"createdAt": conv.get("createdAt", now)}},
+    )
+    if not conv.get("title") or conv.get("title") == "New chat":
+        await mongo.conversations().update_one(
+            {"_id": conv["_id"]},
+            {"$set": {"title": payload.content[:48] + ("…" if len(payload.content) > 48 else "")}},
+        )
+    return MessageOut(
+        id=str(doc["_id"]), conversationId=str(conv["_id"]), role=doc["role"], content=doc["content"],
+        tokens=doc.get("tokens"), model=doc.get("model"), metadata=doc.get("metadata") or {},
+        reaction=None, parentId=payload.parentId, createdAt=now,
+    )
+
+
+@router.patch("/conversations/{cid}/messages/{mid}", response_model=MessageOut)
+async def edit_message(cid: str, mid: str, payload: MessageEdit, user=Depends(current_user)) -> MessageOut:
+    res = await mongo.messages().find_one_and_update(
+        {"_id": ObjectId(mid), "conversationId": ObjectId(cid), "userId": user["_id"]},
+        {"$set": {"content": payload.content, "editedAt": datetime.now(tz=timezone.utc)}},
+        return_document=True,
+    )
+    if not res:
+        raise HTTPException(404, "message not found")
+    return MessageOut(
+        id=str(res["_id"]), conversationId=str(res["conversationId"]), role=res["role"], content=res["content"],
+        tokens=res.get("tokens"), model=res.get("model"), metadata=res.get("metadata") or {},
+        reaction=res.get("reaction"), parentId=str(res["parentId"]) if res.get("parentId") else None,
+        createdAt=res["createdAt"], editedAt=res.get("editedAt"),
+    )
+
+
+@router.delete("/conversations/{cid}/messages/{mid}", status_code=204)
+async def delete_message(cid: str, mid: str, user=Depends(current_user)) -> None:
+    res = await mongo.messages().delete_one({
+        "_id": ObjectId(mid), "conversationId": ObjectId(cid), "userId": user["_id"],
+    })
+    if res.deleted_count == 0:
+        raise HTTPException(404, "message not found")
+
+
+@router.post("/conversations/{cid}/messages/{mid}/react", response_model=MessageOut)
+async def react_message(cid: str, mid: str, payload: MessageReaction, user=Depends(current_user)) -> MessageOut:
+    # Verify the message belongs to one of the current user's conversations
+    conv = await mongo.conversations().find_one({"_id": ObjectId(cid), "userId": user["_id"]})
+    if not conv:
+        raise HTTPException(404, "conversation not found")
+    res = await mongo.messages().find_one_and_update(
+        {"_id": ObjectId(mid), "conversationId": ObjectId(cid)},
+        {"$set": {"reaction": payload.reaction}},
+        return_document=True,
+    )
+    if not res:
+        raise HTTPException(404, "message not found")
+    return MessageOut(
+        id=str(res["_id"]), conversationId=str(res["conversationId"]), role=res["role"], content=res["content"],
+        tokens=res.get("tokens"), model=res.get("model"), metadata=res.get("metadata") or {},
+        reaction=res.get("reaction"), parentId=str(res["parentId"]) if res.get("parentId") else None,
+        createdAt=res["createdAt"], editedAt=res.get("editedAt"),
+    )
+
+
+# ---- Streaming ----
+async def _build_messages(conv: dict, user_content: str) -> list[ChatMessage]:
+    history = await mongo.messages().find({"conversationId": conv["_id"]}).sort("createdAt", 1).to_list(length=400)
+    msgs: list[ChatMessage] = []
+    for m in history:
+        if m["role"] in ("user", "assistant", "system", "tool"):
+            msgs.append(ChatMessage(role=m["role"], content=m["content"]))
+    msgs.append(ChatMessage(role="user", content=user_content))
+    return msgs
+
+
+async def _resolve_provider(conv: dict, requested_model_id: str | None, user: dict) -> tuple[Any, dict]:
+    """Returns (provider, model_doc)."""
+    model_id = requested_model_id or (str(conv["modelId"]) if conv.get("modelId") else None)
+    if model_id:
+        m = await mongo.models_col().find_one({"_id": ObjectId(model_id)})
+        if not m or not m.get("enabled"):
+            raise HTTPException(400, "model unavailable")
+    else:
+        m = await mongo.models_col().find_one({"enabled": True}, sort=[("name", 1)])
+        if not m:
+            raise HTTPException(400, "no models configured")
+    api_key = decrypt(m.get("encryptedApiKey") or "")
+    if not api_key and m["provider"] != "ollama":
+        raise HTTPException(400, "model has no API key configured")
+    return get_provider(m["provider"], api_key=api_key, endpoint=m.get("endpoint")), m
+
+
+async def _build_system_prompt(model_doc: dict, user: dict, conversation_id: ObjectId) -> str:
+    from app.services.prompt_guard import assemble, sanitize_memory
+    parts: list[str] = []
+    if model_doc.get("systemPromptId"):
+        prompt = await mongo.system_prompts().find_one({"_id": model_doc["systemPromptId"]})
+        if prompt:
+            for v in prompt.get("versions", []):
+                if v["version"] == prompt.get("currentVersion", 1):
+                    parts.append(v["content"])
+                    break
+    # memory slices — sanitised
+    grouped = await gather_for_chat(user["_id"], conversation_id)
+    if grouped.get("long_term"):
+        parts.append("Long-term memory:\n- " + "\n- ".join(sanitize_memory(m) for m in grouped["long_term"]))
+    if grouped.get("preference"):
+        parts.append("User preferences:\n- " + "\n- ".join(sanitize_memory(m) for m in grouped["preference"]))
+    if grouped.get("summary"):
+        parts.append("Conversation summaries (older context):\n- " + "\n- ".join(sanitize_memory(m) for m in grouped["summary"][:3]))
+    if grouped.get("context"):
+        parts.append("Relevant context:\n- " + "\n- ".join(sanitize_memory(m) for m in grouped["context"][:5]))
+    return assemble(parts, max_chars=8000)
+
+
+@router.post("/conversations/{cid}/stream")
+async def stream_message(
+    cid: str,
+    payload: MessageCreate,
+    request: Request,
+    background: BackgroundTasks,
+    user=Depends(current_user),
+    _: None = Depends(rate_limit),
+) -> EventSourceResponse:
+    await enforce_approval(user)
+    conv = await mongo.conversations().find_one({"_id": ObjectId(cid), "userId": user["_id"]})
+    if not conv:
+        raise HTTPException(404, "conversation not found")
+
+    # Persist user message
+    now = datetime.now(tz=timezone.utc)
+    user_msg_doc = {
+        "conversationId": conv["_id"],
+        "userId": user["_id"],
+        "role": "user",
+        "content": payload.content,
+        "tokens": None,
+        "model": None,
+        "metadata": {"attachments": payload.attachments or []},
+        "parentId": ObjectId(payload.parentId) if payload.parentId else None,
+        "createdAt": now,
+    }
+    user_msg_res = await mongo.messages().insert_one(user_msg_doc)
+    user_msg_id = user_msg_res.inserted_id
+
+    # Update conversation meta
+    title_update = {}
+    if conv.get("title") in (None, "New chat"):
+        title_update["title"] = payload.content[:48] + ("…" if len(payload.content) > 48 else "")
+    await mongo.conversations().update_one(
+        {"_id": conv["_id"]},
+        {"$set": {"updatedAt": now, "lastMessageAt": now, **title_update}},
+    )
+
+    provider, model_doc = await _resolve_provider(conv, payload.modelId, user)
+    system_prompt = await _build_system_prompt(model_doc, user, conv["_id"])
+    if payload.webSearch:
+        search_text = await _web_search_for_chat(payload.content)
+        if search_text:
+            web_block = f"\n\n## Current Web Search Results\n\n{search_text}"
+            system_prompt = (system_prompt + web_block) if system_prompt else web_block
+    history = await _build_messages(conv, payload.content)
+
+    req = ChatRequest(
+        model=model_doc["name"],
+        messages=history,
+        temperature=model_doc.get("temperature", 0.7),
+        max_tokens=model_doc.get("maxTokens", 4096),
+        top_p=model_doc.get("topP", 1.0),
+        stream=True,
+        user=str(user["_id"]),
+        system_prompt=system_prompt or None,
+    )
+
+    async def event_gen():
+        buffer: list[str] = []
+        start = time.perf_counter()
+        first_token_at: float | None = None
+        finish_reason: str | None = None
+        assistant_id: ObjectId | None = None
+        try:
+            yield {"event": "start", "data": json.dumps({
+                "userMessageId": str(user_msg_id),
+                "model": model_doc["name"],
+                "provider": model_doc["provider"],
+            })}
+            async for chunk in provider.stream(req):
+                if await request.is_disconnected():
+                    break
+                if first_token_at is None and chunk.delta:
+                    first_token_at = time.perf_counter()
+                if chunk.delta:
+                    buffer.append(chunk.delta)
+                    yield {"event": "delta", "data": json.dumps({"text": chunk.delta})}
+                if chunk.finish_reason:
+                    finish_reason = chunk.finish_reason
+                    yield {"event": "finish", "data": json.dumps({"reason": finish_reason})}
+                    break
+        except asyncio.CancelledError:
+            finish_reason = "cancelled"
+        except Exception as e:
+            log.exception("stream error: %s", e)
+            buffer.append(f"\n\n[Error: {type(e).__name__}: {e}]")
+            finish_reason = "error"
+            yield {"event": "error", "data": json.dumps({"message": str(e)})}
+        finally:
+            full = "".join(buffer)
+            now2 = datetime.now(tz=timezone.utc)
+            # Save assistant message
+            assistant_doc = {
+                "conversationId": conv["_id"],
+                "userId": user["_id"],
+                "role": "assistant",
+                "content": full,
+                "tokens": provider.count_tokens(full),
+                "model": model_doc["name"],
+                "metadata": {
+                    "latency_ms": int((time.perf_counter() - start) * 1000),
+                    "ttft_ms": int(((first_token_at or time.perf_counter()) - start) * 1000),
+                    "finish_reason": finish_reason,
+                    "provider": model_doc["provider"],
+                },
+                "parentId": user_msg_id,
+                "createdAt": now2,
+            }
+            res = await mongo.messages().insert_one(assistant_doc)
+            assistant_id = res.inserted_id
+
+            # Save as Canvas if requested
+            canvas_id: ObjectId | None = None
+            if payload.canvas and full.strip():
+                canvas_title = conv.get("title") or payload.content[:48] + "…"
+                canvas_doc = {
+                    "ownerId": user["_id"],
+                    "title": canvas_title,
+                    "type": "document",
+                    "content": full,
+                    "metadata": {"source": "chat", "conversationId": str(conv["_id"]), "model": model_doc["name"], "provider": model_doc["provider"]},
+                    "conversationId": conv["_id"],
+                    "currentVersion": 1,
+                    "createdAt": now2,
+                    "updatedAt": now2,
+                }
+                canvas_res = await mongo.canvases().insert_one(canvas_doc)
+                canvas_id = canvas_res.inserted_id
+                await mongo.canvas_versions().insert_one({
+                    "canvasId": canvas_id,
+                    "version": 1,
+                    "content": full,
+                    "commitMessage": "Chat response",
+                    "authorId": user["_id"],
+                    "createdAt": now2,
+                })
+
+            done_data: dict[str, Any] = {
+                "assistantMessageId": str(assistant_id),
+                "tokens": assistant_doc["tokens"],
+                "latency_ms": assistant_doc["metadata"]["latency_ms"],
+                "ttft_ms": assistant_doc["metadata"]["ttft_ms"],
+            }
+            if canvas_id:
+                done_data["canvasId"] = str(canvas_id)
+            yield {"event": "done", "data": json.dumps(done_data)}
+            background.add_task(_track_usage, user["_id"], assistant_doc["tokens"], model_doc["provider"])
+
+    return EventSourceResponse(event_gen())
+
+
+async def _track_usage(user_id: ObjectId, tokens: int, provider: str) -> None:
+    from app.cache.redis import client as redis_client
+    from datetime import datetime
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    key = f"usage:{today}:{provider}"
+    try:
+        await redis_client().incrby(key, tokens)
+        await redis_client().expire(key, 60 * 60 * 24 * 60)
+    except Exception:
+        log.exception("track_usage failed")

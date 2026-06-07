@@ -1,0 +1,26 @@
+from fastapi import APIRouter
+
+router = APIRouter(tags=["health"])
+
+
+@router.get("/health")
+async def health() -> dict:
+    return {"status": "ok", "service": "wormgpt-api"}
+
+
+@router.get("/health/ready")
+async def ready() -> dict:
+    from app.db import mongo
+    from app.cache import redis as redis_cache
+    info: dict = {"mongo": "unknown", "redis": "unknown"}
+    try:
+        await mongo.db().command("ping")
+        info["mongo"] = "ok"
+    except Exception as e:
+        info["mongo"] = f"error: {e}"
+    try:
+        await redis_cache.client().ping()
+        info["redis"] = "ok"
+    except Exception as e:
+        info["redis"] = f"error: {e}"
+    return info
