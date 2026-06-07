@@ -1,8 +1,9 @@
 FROM python:3.13-slim
 
-RUN apt-get update && apt-get install -y curl && \
+RUN apt-get update && apt-get install -y curl ca-certificates && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
+    apt-get upgrade -y ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 1000 user
