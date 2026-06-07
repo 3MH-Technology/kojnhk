@@ -15,10 +15,10 @@ async def main() -> None:
     now = datetime.now(tz=timezone.utc)
     s = get_settings()
 
-    if await mongo.users().count_documents({"email": "admin@wormgpt.dev"}) == 0:
+    if await mongo.users().count_documents({"email": "admin@teteffd.hf.space"}) == 0:
         await mongo.users().insert_one({
             "username": "admin",
-            "email": "admin@wormgpt.dev",
+            "email": "admin@teteffd.hf.space",
             "passwordHash": hash_password("Admin123!"),
             "role": "superadmin",
             "status": "approved",
@@ -29,12 +29,12 @@ async def main() -> None:
             "failedLoginAttempts": 0,
             "lockedUntil": None,
         })
-        print("seeded superadmin admin@wormgpt.dev / Admin123!")
+        print("seeded superadmin admin@teteffd.hf.space / Admin123!")
 
-    if await mongo.users().count_documents({"email": "developer@wormgpt.dev"}) == 0:
+    if await mongo.users().count_documents({"email": "developer@teteffd.hf.space"}) == 0:
         await mongo.users().insert_one({
             "username": "developer",
-            "email": "developer@wormgpt.dev",
+            "email": "developer@teteffd.hf.space",
             "passwordHash": hash_password("Dev123!"),
             "role": "developer",
             "status": "approved",
@@ -45,7 +45,7 @@ async def main() -> None:
             "failedLoginAttempts": 0,
             "lockedUntil": None,
         })
-        print("seeded developer developer@wormgpt.dev / Dev123!")
+        print("seeded developer developer@teteffd.hf.space / Dev123!")
 
     if await mongo.system_prompts().count_documents({"name": "WormGPT Default"}) == 0:
         await mongo.system_prompts().insert_one({

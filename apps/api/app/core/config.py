@@ -64,8 +64,8 @@ class Settings(BaseSettings):
     max_context_tokens: int = 32_000
 
     # ---- Bootstrap admin ----
-    bootstrap_admin_email: str = "admin@wormgpt.dev"
-    bootstrap_admin_password: str = "ChangeMe123!"
+    bootstrap_admin_email: str = "admin@teteffd.hf.space"
+    bootstrap_admin_password: str = "Admin123!"
     bootstrap_admin_username: str = "admin"
 
     @field_validator("jwt_secret", "csrf_secret", "encryption_key")
