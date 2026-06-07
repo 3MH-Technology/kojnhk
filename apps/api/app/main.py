@@ -43,26 +43,69 @@ async def _ensure_indexes() -> None:
 
 
 async def _bootstrap_admin() -> None:
-    existing = await mongo.users().count_documents({})
-    if existing > 0:
-        return
-    log.warning("no users in db; creating bootstrap superadmin")
     now = datetime.now(tz=timezone.utc)
-    doc = {
-        "username": settings.bootstrap_admin_username,
-        "email": settings.bootstrap_admin_email.lower(),
-        "passwordHash": hash_password(settings.bootstrap_admin_password),
-        "role": "superadmin",
-        "status": "approved",
-        "avatar": None,
-        "createdAt": now,
-        "updatedAt": now,
-        "lastLogin": None,
-        "failedLoginAttempts": 0,
-        "lockedUntil": None,
-    }
-    await mongo.users().insert_one(doc)
-    log.info("bootstrap admin created: %s", settings.bootstrap_admin_email)
+    created = 0
+
+    if await mongo.users().count_documents({}) == 0:
+        log.warning("no users in db; creating bootstrap accounts")
+        doc = {
+            "username": settings.bootstrap_admin_username,
+            "email": settings.bootstrap_admin_email.lower(),
+            "passwordHash": hash_password(settings.bootstrap_admin_password),
+            "role": "superadmin",
+            "status": "approved",
+            "avatar": None,
+            "createdAt": now,
+            "updatedAt": now,
+            "lastLogin": None,
+            "failedLoginAttempts": 0,
+            "lockedUntil": None,
+        }
+        await mongo.users().insert_one(doc)
+        log.info("bootstrap admin created: %s", settings.bootstrap_admin_email)
+        created += 1
+
+    if await mongo.users().count_documents({"email": "developer@teteffd.hf.space"}) == 0:
+        await mongo.users().insert_one({
+            "username": "developer",
+            "email": "developer@teteffd.hf.space",
+            "passwordHash": hash_password("Dev123!"),
+            "role": "developer",
+            "status": "approved",
+            "avatar": None,
+            "createdAt": now,
+            "updatedAt": now,
+            "lastLogin": None,
+            "failedLoginAttempts": 0,
+            "lockedUntil": None,
+        })
+        log.info("bootstrap developer created")
+        created += 1
+
+    if await mongo.system_prompts().count_documents({"name": "WormGPT Default"}) == 0:
+        await mongo.system_prompts().insert_one({
+            "name": "WormGPT Default",
+            "description": "Helpful, accurate, concise assistant.",
+            "content": "You are WormGPT, a helpful, accurate, and concise AI assistant. "
+                       "When unsure, say you don't know. Cite sources when relevant.",
+            "tags": ["general"],
+            "active": True,
+            "currentVersion": 1,
+            "versions": [{
+                "version": 1,
+                "content": "You are WormGPT, a helpful, accurate, and concise AI assistant. "
+                           "When unsure, say you don't know. Cite sources when relevant.",
+                "changelog": "initial",
+                "createdAt": now,
+            }],
+            "createdAt": now,
+            "updatedAt": now,
+        })
+        log.info("bootstrap system prompt created")
+        created += 1
+
+    if created:
+        log.info("bootstrap complete: %d items created", created)
 
 
 app = FastAPI(
