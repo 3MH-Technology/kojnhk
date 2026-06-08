@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     max_context_tokens: int = 32_000
 
     # ---- Bootstrap admin ----
-    bootstrap_admin_email: str = "admin@teteffd.hf.space"
+    bootstrap_admin_email: str = "admin@falaki-ai.pages.dev"
     bootstrap_admin_password: str = "Admin123!"
     bootstrap_admin_username: str = "admin"
 
