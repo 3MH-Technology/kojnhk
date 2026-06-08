@@ -60,9 +60,5 @@ class GroqProvider(BaseProvider):
             yield ChatChunk(delta=f"\n\n[Error: {type(e).__name__}: {e}]", finish_reason="error")
 
     async def list_models(self) -> list[str]:
-        try:
-            resp = await self.client.models.list()
-            return sorted([m.id for m in resp.data])
-        except Exception as e:
-            log.exception("groq.list_models.error err=%s", e)
-            return []
+        resp = await self.client.models.list()
+        return sorted([m.id for m in resp.data])
