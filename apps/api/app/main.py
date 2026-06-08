@@ -15,7 +15,7 @@ from app.cache import redis as redis_cache
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.middleware import CSRFMiddleware, RequestContextMiddleware, SecurityHeadersMiddleware
-from app.core.security import hash_password
+from app.core.security import hash_password, verify_password
 from app.db import mongo
 
 configure_logging()
@@ -48,10 +48,8 @@ async def _bootstrap_admin() -> None:
 
     admin_email = settings.bootstrap_admin_email.lower()
     admin_username = settings.bootstrap_admin_username
-    admin_exists = await mongo.users().count_documents({
-        "$or": [{"email": admin_email}, {"username": admin_username}]
-    }) > 0
-    if not admin_exists:
+    admin = await mongo.users().find_one({"username": admin_username})
+    if not admin:
         await mongo.users().insert_one({
             "username": admin_username,
             "email": admin_email,
@@ -67,12 +65,21 @@ async def _bootstrap_admin() -> None:
         })
         log.info("bootstrap admin created: %s", admin_email)
         created += 1
+    elif admin.get("email") != admin_email or not verify_password(settings.bootstrap_admin_password, admin.get("passwordHash", "")):
+        await mongo.users().update_one(
+            {"_id": admin["_id"]},
+            {"$set": {
+                "email": admin_email,
+                "passwordHash": hash_password(settings.bootstrap_admin_password),
+                "updatedAt": now,
+            }},
+        )
+        log.info("bootstrap admin updated: %s", admin_email)
+        created += 1
 
     dev_email = "developer@teteffd.hf.space"
-    dev_exists = await mongo.users().count_documents({
-        "$or": [{"email": dev_email}, {"username": "developer"}]
-    }) > 0
-    if not dev_exists:
+    dev = await mongo.users().find_one({"username": "developer"})
+    if not dev:
         await mongo.users().insert_one({
             "username": "developer",
             "email": dev_email,
@@ -87,6 +94,17 @@ async def _bootstrap_admin() -> None:
             "lockedUntil": None,
         })
         log.info("bootstrap developer created")
+        created += 1
+    elif dev.get("email") != dev_email or not verify_password("Dev123!", dev.get("passwordHash", "")):
+        await mongo.users().update_one(
+            {"_id": dev["_id"]},
+            {"$set": {
+                "email": dev_email,
+                "passwordHash": hash_password("Dev123!"),
+                "updatedAt": now,
+            }},
+        )
+        log.info("bootstrap developer updated")
         created += 1
 
     if await mongo.system_prompts().count_documents({"name": "WormGPT Default"}) == 0:
