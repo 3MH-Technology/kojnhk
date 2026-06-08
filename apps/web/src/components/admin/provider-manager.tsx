@@ -56,7 +56,10 @@ export function ProviderManager() {
 
   const testKey = useMutation({
     mutationFn: async (provider: string) => (await api.post(`/providers/${provider}/test`)).data,
-    onSuccess: (d: any) => toast.success(`Key valid: ${d.modelsFound} models found`),
+    onSuccess: (d: any) => {
+      if (d.ok) toast.success(`Key valid: ${d.modelsFound} models found`)
+      else toast.error(`Test failed: ${d.error || 'unknown error'}`)
+    },
     onError: (e: any) => toast.error(e?.response?.data?.detail || 'Test failed'),
   })
 
