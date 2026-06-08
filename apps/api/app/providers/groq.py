@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 class GroqProvider(BaseProvider):
     name = "groq"
 
-    def __init__(self, api_key: str, base_url: str = "https://api.groq.com/openai/v1", **kw: Any) -> None:
+    def __init__(self, api_key: str, base_url: str = "https://api.groq.com", **kw: Any) -> None:
         super().__init__(**kw)
         if not api_key:
             raise ValueError("Groq API key required")

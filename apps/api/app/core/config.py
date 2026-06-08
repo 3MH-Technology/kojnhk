@@ -43,7 +43,7 @@ class Settings(BaseSettings):
 
     # ---- Providers ----
     groq_api_key: str = ""
-    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_base_url: str = "https://api.groq.com"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
